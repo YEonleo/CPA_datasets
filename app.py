@@ -20,6 +20,7 @@ BACKUP_DIR = "backups"
 ERROR_REPORT_FILE = os.path.join("data", "error_report.md")
 UPLOAD_DIR = os.path.join("data", "uploads")
 MANUAL_CHECK_FILE = os.path.join("data", "manual_check_status.json")
+REVIEW_STATUS_FILE = os.path.join("data", "review_status.json")
 
 # 필요한 디렉토리 생성
 os.makedirs(BACKUP_DIR, exist_ok=True)
@@ -67,6 +68,45 @@ def is_manually_checked(year, subject, question_number, check_status):
     """해당 문항이 수동으로 체크되었는지 확인"""
     key = get_check_key(year, subject, question_number)
     return check_status.get(key, False)
+
+# ==========================================
+# ✅ 문항 검토 상태 관리
+# ==========================================
+def load_review_status():
+    """문항 검토 상태 로드"""
+    if not os.path.exists(REVIEW_STATUS_FILE):
+        return {}
+    try:
+        with open(REVIEW_STATUS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            return data.get('reviewed_questions', {})
+    except Exception:
+        return {}
+
+def save_review_status(reviewed):
+    """문항 검토 상태 저장"""
+    try:
+        data = {
+            "description": "문항별 검토 완료 상태를 저장합니다.",
+            "format": "unique_id: {checked: bool, timestamp: str}",
+            "reviewed_questions": reviewed
+        }
+        with open(REVIEW_STATUS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+def get_review_stats(all_data, reviewed, year=None, subject=None):
+    """검토 진행 통계 반환"""
+    targets = all_data
+    if year:
+        targets = [d for d in targets if d.get('metadata', {}).get('year') == year]
+    if subject:
+        targets = [d for d in targets if d.get('metadata', {}).get('subject') == subject]
+    total = len(targets)
+    done = sum(1 for d in targets if reviewed.get(d.get('unique_id', ''), {}).get('checked', False))
+    return total, done
 
 @st.cache_data
 def load_error_report():
@@ -608,9 +648,13 @@ if 'data' not in st.session_state:
 if 'manual_check_status' not in st.session_state:
     st.session_state['manual_check_status'] = load_manual_check_status()
 
+if 'review_status' not in st.session_state:
+    st.session_state['review_status'] = load_review_status()
+
 # 전체 데이터 참조
 all_data = st.session_state['data']
 manual_check_status = st.session_state['manual_check_status']
+review_status = st.session_state['review_status']
 
 # ==========================================
 # 🎛️ 사이드바: 필터링 및 통계
@@ -754,6 +798,51 @@ st.sidebar.markdown("### 📊 데이터 통계")
 st.sidebar.text(f"전체 데이터: {len(all_data)}개")
 st.sidebar.text(f"전체 연도: {len(years)}개")
 st.sidebar.text(f"현재 연도 과목: {len(subjects_in_year)}개")
+
+# ── 검토 진행률 ──
+st.sidebar.markdown("---")
+st.sidebar.markdown("### ✅ 검토 진행률")
+
+# 현재 연도·과목 진행률
+total_cur, done_cur = get_review_stats(all_data, review_status, year=selected_year, subject=selected_subject)
+if total_cur > 0:
+    pct_cur = done_cur / total_cur
+    st.sidebar.progress(pct_cur, text=f"{selected_year}년 {selected_subject}: {done_cur}/{total_cur} ({pct_cur*100:.0f}%)")
+else:
+    st.sidebar.caption("문항 없음")
+
+# 현재 연도 전체 진행률
+total_year, done_year = get_review_stats(all_data, review_status, year=selected_year)
+if total_year > 0:
+    pct_year = done_year / total_year
+    st.sidebar.progress(pct_year, text=f"{selected_year}년 전체: {done_year}/{total_year} ({pct_year*100:.0f}%)")
+
+# 전체 진행률
+total_all, done_all = get_review_stats(all_data, review_status)
+if total_all > 0:
+    pct_all = done_all / total_all
+    st.sidebar.progress(pct_all, text=f"전체: {done_all}/{total_all} ({pct_all*100:.0f}%)")
+
+# ── 캐시 / 세션 초기화 ──
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🔄 캐시·세션 관리")
+cache_col1, cache_col2 = st.sidebar.columns(2)
+with cache_col1:
+    if st.button("🔄 캐시 초기화", key="btn_clear_cache", use_container_width=True,
+                 help="파일을 다시 읽어 최신 데이터로 새로고침합니다."):
+        st.cache_data.clear()
+        for k in ['data', 'manual_check_status', 'review_status']:
+            if k in st.session_state:
+                del st.session_state[k]
+        st.toast("캐시 초기화 완료! 새로고침합니다.", icon="🔄")
+        st.rerun()
+with cache_col2:
+    if st.button("🗑️ 검토 초기화", key="btn_clear_review", use_container_width=True,
+                 help="모든 문항의 검토 체크를 초기화합니다."):
+        st.session_state['review_status'] = {}
+        save_review_status({})
+        st.toast("검토 상태 초기화 완료!", icon="🗑️")
+        st.rerun()
 
 # 누락된 문항 정보 표시
 st.sidebar.markdown("---")
@@ -1098,15 +1187,19 @@ with main_tab1:
                         ):
                             st.session_state[value_key] = existing_nums[0]
 
-                        # 문항 번호 버튼 선택 (스크롤 선택 유지)
+                        # 문항 번호 버튼 선택 (스크롤 선택 유지) — 검토 완료 항목은 ✅ 표시
                         with st.expander("🖱️ 문항 번호 빠른 선택 (버튼)", expanded=False):
-                            st.caption("버튼으로 문항 번호를 빠르게 선택할 수 있습니다.")
+                            st.caption("버튼으로 문항 번호를 빠르게 선택할 수 있습니다. ✅ = 검토 완료")
                             cols_per_row = 10
                             for i in range(0, len(existing_nums), cols_per_row):
                                 cols = st.columns(cols_per_row)
                                 for j, num in enumerate(existing_nums[i : i + cols_per_row]):
                                     is_selected = st.session_state.get(value_key) == num
-                                    label = f"{num}번"
+                                    # 검토 완료 여부 확인
+                                    _uid = q_options.get(num)
+                                    _uid_str = all_data[_uid].get('unique_id', '') if _uid is not None else ''
+                                    _is_reviewed = review_status.get(_uid_str, {}).get('checked', False)
+                                    label = f"✅{num}" if _is_reviewed else f"{num}번"
                                     btn_kwargs = {"use_container_width": True}
                                     if is_selected:
                                         btn_kwargs["type"] = "primary"
@@ -1174,10 +1267,17 @@ with main_tab1:
                             def sync_selected_question():
                                 st.session_state[value_key] = st.session_state[select_key]
 
+                            # selectbox에 검토 완료 표시
+                            def _fmt_q(x):
+                                _idx = q_options.get(x)
+                                _uid = all_data[_idx].get('unique_id', '') if _idx is not None else ''
+                                _done = review_status.get(_uid, {}).get('checked', False)
+                                return f"✅ {x}번 문항" if _done else f"   {x}번 문항"
+
                             selected_q_num = st.selectbox(
                                 "📝 수정할 문항 번호 선택", 
                                 options=existing_nums,
-                                format_func=lambda x: f"{x}번 문항",
+                                format_func=_fmt_q,
                                 key=select_key,
                                 index=existing_nums.index(st.session_state[value_key]),
                                 on_change=sync_selected_question,
@@ -1197,7 +1297,7 @@ with main_tab1:
                                 if current_idx + 1 < len(existing_nums)
                                 else None
                             )
-                            nav_cols = st.columns(2)
+                            nav_cols = st.columns(3)
                             with nav_cols[0]:
                                 if st.button(
                                     "◀ 이전",
@@ -1216,57 +1316,154 @@ with main_tab1:
                                 ):
                                     st.session_state[value_key] = next_num
                                     st.rerun()
+                            with nav_cols[2]:
+                                # 미검토 문항으로 바로 이동
+                                _unreviewed = [
+                                    n for n in existing_nums
+                                    if not review_status.get(
+                                        all_data[q_options[n]].get('unique_id', ''), {}
+                                    ).get('checked', False)
+                                ]
+                                if st.button(
+                                    f"⏭ 미검토({len(_unreviewed)})",
+                                    key="nav_next_unreviewed",
+                                    use_container_width=True,
+                                    disabled=len(_unreviewed) == 0,
+                                    help="아직 검토하지 않은 다음 문항으로 이동",
+                                ):
+                                    if _unreviewed:
+                                        # 현재 문항 이후의 미검토 문항 찾기, 없으면 처음부터
+                                        _after = [n for n in _unreviewed if n > selected_q_num]
+                                        _target = _after[0] if _after else _unreviewed[0]
+                                        st.session_state[value_key] = _target
+                                        st.rerun()
                         
                         # 선택된 문항 데이터 로드
                         if selected_q_num in q_options:
                             target_idx = q_options[selected_q_num]
                             target_data = all_data[target_idx]
                             
-                            # 문항 내용 미리보기
-                            with st.expander("👀 현재 문항 내용 보기"):
-                                # conversation에서 문제 내용 추출
-                                if 'conversation' in target_data and len(target_data['conversation']) > 0:
-                                    user_msg = target_data['conversation'][0].get('content', '')
-                                    st.text_area("문제 내용", value=user_msg[:500], height=150, disabled=True, key=f"preview_{selected_q_num}")
-                                    
-                                    if len(target_data['conversation']) > 1:
-                                        answer = target_data['conversation'][1].get('content', '')
-                                        st.info(f"**정답**: {answer}")
-                                
-                                st.json(target_data)
-                            
-                            # JSON 에디터
-                            st.markdown("### ✏️ JSON 편집")
-                            edited_json = st.text_area(
-                                f"{selected_q_num}번 문항 JSON",
-                                value=json.dumps(target_data, indent=2, ensure_ascii=False),
-                                height=450,
-                                key=f"edit_json_{selected_q_num}"
+                            # ── 검토 완료 체크박스 ──
+                            _cur_uid = target_data.get('unique_id', '')
+                            _cur_reviewed = review_status.get(_cur_uid, {}).get('checked', False)
+                            _review_cb = st.checkbox(
+                                f"✅ {selected_q_num}번 문항 검토 완료",
+                                value=_cur_reviewed,
+                                key=f"review_cb_{_cur_uid}",
                             )
+                            if _review_cb != _cur_reviewed:
+                                if _review_cb:
+                                    st.session_state['review_status'][_cur_uid] = {
+                                        'checked': True,
+                                        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    }
+                                else:
+                                    if _cur_uid in st.session_state['review_status']:
+                                        del st.session_state['review_status'][_cur_uid]
+                                save_review_status(st.session_state['review_status'])
+                                st.rerun()
                             
-                            col_save, col_cancel = st.columns([1, 3])
-                            
+                            # 문항 내용 보기 + 편집 통합 UI
+                            _conv = target_data.get('conversation', [])
+                            _meta = target_data.get('metadata', {})
+                            _uid_display = target_data.get('unique_id', '')
+
+                            # ── 메타데이터 요약 ──
+                            _meta_cols = st.columns(4)
+                            _meta_cols[0].markdown(f"**연도**: {_meta.get('year', '-')}")
+                            _meta_cols[1].markdown(f"**과목**: {_meta.get('subject', '-')}")
+                            _meta_cols[2].markdown(f"**문항**: {_meta.get('question_number', '-')}번")
+                            _meta_cols[3].markdown(f"**ID**: `{_uid_display}`")
+
+                            # ── 문제 내용 (user) 편집 ──
+                            _user_content = _conv[0].get('content', '') if len(_conv) > 0 else ''
+                            st.markdown("#### 📝 문제 내용")
+                            edited_user = st.text_area(
+                                "문제 (user)",
+                                value=_user_content,
+                                height=300,
+                                key=f"edit_user_{selected_q_num}",
+                                label_visibility="collapsed",
+                            )
+
+                            # ── 정답 (assistant) 편집 ──
+                            _asst_content = _conv[1].get('content', '') if len(_conv) > 1 else ''
+                            st.markdown("#### ✅ 정답")
+                            edited_answer = st.text_area(
+                                "정답 (assistant)",
+                                value=_asst_content,
+                                height=68,
+                                key=f"edit_asst_{selected_q_num}",
+                                label_visibility="collapsed",
+                            )
+
+                            # ── 전체 JSON 편집 (고급) ──
+                            with st.expander("🔧 전체 JSON 편집 (고급)", expanded=False):
+                                edited_json = st.text_area(
+                                    f"{selected_q_num}번 전체 JSON",
+                                    value=json.dumps(target_data, indent=2, ensure_ascii=False),
+                                    height=400,
+                                    key=f"edit_json_{selected_q_num}",
+                                    label_visibility="collapsed",
+                                )
+
+                            # ── 저장 버튼 ──
+                            col_save, col_json_save, col_spacer = st.columns([1, 1, 2])
+
                             with col_save:
                                 if st.button("💾 저장", key="save_edit", type="primary", use_container_width=True):
                                     try:
-                                        new_entry = json.loads(edited_json)
-                                        
-                                        # 유효성 검증
+                                        # 위의 문제/정답 필드로 새 entry 구성
+                                        new_entry = json.loads(json.dumps(target_data))  # deep copy
+                                        if len(new_entry.get('conversation', [])) > 0:
+                                            new_entry['conversation'][0]['content'] = edited_user
+                                        if len(new_entry.get('conversation', [])) > 1:
+                                            new_entry['conversation'][1]['content'] = edited_answer
+
                                         is_valid, msg = validate_entry(new_entry)
                                         if not is_valid:
                                             st.error(f"❌ 검증 실패: {msg}")
                                         else:
-                                            # 메모리 업데이트
                                             st.session_state['data'][target_idx] = new_entry
-                                            
-                                            # 파일 저장
                                             if save_data_to_file(st.session_state['data']):
+                                                _saved_uid = new_entry.get('unique_id', '')
+                                                if _saved_uid:
+                                                    st.session_state['review_status'][_saved_uid] = {
+                                                        'checked': True,
+                                                        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                                    }
+                                                    save_review_status(st.session_state['review_status'])
                                                 st.toast(f"✅ {selected_q_num}번 저장 완료!", icon="✅")
                                                 st.success("저장되었습니다!")
                                                 st.rerun()
                                             else:
                                                 st.error("파일 저장 실패")
-                                                
+                                    except Exception as e:
+                                        st.error(f"❌ 오류: {e}")
+
+                            with col_json_save:
+                                if st.button("💾 JSON 저장", key="save_json_edit", use_container_width=True,
+                                             help="'전체 JSON 편집' 내용으로 저장합니다"):
+                                    try:
+                                        new_entry = json.loads(edited_json)
+                                        is_valid, msg = validate_entry(new_entry)
+                                        if not is_valid:
+                                            st.error(f"❌ 검증 실패: {msg}")
+                                        else:
+                                            st.session_state['data'][target_idx] = new_entry
+                                            if save_data_to_file(st.session_state['data']):
+                                                _saved_uid = new_entry.get('unique_id', '')
+                                                if _saved_uid:
+                                                    st.session_state['review_status'][_saved_uid] = {
+                                                        'checked': True,
+                                                        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                                    }
+                                                    save_review_status(st.session_state['review_status'])
+                                                st.toast(f"✅ {selected_q_num}번 JSON 저장 완료!", icon="✅")
+                                                st.success("저장되었습니다!")
+                                                st.rerun()
+                                            else:
+                                                st.error("파일 저장 실패")
                                     except json.JSONDecodeError as je:
                                         st.error(f"❌ JSON 형식 오류: {je}")
                                     except Exception as e:
