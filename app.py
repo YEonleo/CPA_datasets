@@ -320,9 +320,9 @@ def display_pdf(pdf_path):
         with open(pdf_path, "rb") as f:
             base64_pdf = base64.b64encode(f.read()).decode('utf-8')
         
-        # PDF를 iframe으로 표시
+        # PDF를 iframe으로 표시 (navpanes=0 → 왼쪽 썸네일 패널 숨김)
         pdf_display = f'''
-        <iframe src="data:application/pdf;base64,{base64_pdf}" 
+        <iframe src="data:application/pdf;base64,{base64_pdf}#navpanes=0&scrollbar=1&view=FitH" 
                 width="100%" 
                 height="800px" 
                 type="application/pdf"
@@ -947,12 +947,19 @@ st.title(f"🛠️ {selected_year}년 {selected_subject} 데이터 수정")
 main_tab1, main_tab2 = st.tabs(["📝 문항 편집", "📋 오류 리포트 전체보기"])
 
 with main_tab1:
-    col_pdf, col_edit = st.columns([1, 1])
-    
+    # PDF 표시 토글 (기본 OFF → 편집기 전체 너비)
+    _show_pdf = st.toggle("📄 PDF 원문 함께 보기", value=False, key="toggle_pdf_view")
+
+    if _show_pdf:
+        col_pdf, col_edit = st.columns([1, 1])
+    else:
+        col_edit = st.container()
+
     # ---------------------------------------------------------
-    # [왼쪽] PDF 뷰어
+    # [왼쪽] PDF 뷰어 — 토글 ON일 때만 표시
     # ---------------------------------------------------------
-    with col_pdf:
+    if _show_pdf:
+      with col_pdf:
         st.header("📄 PDF 원문")
         
         if selected_subject == '과목 없음':
@@ -1108,7 +1115,7 @@ with main_tab1:
                     st.info("💡 정답 PDF는 연도별로 전체 과목의 정답이 포함되어 있습니다.")
 
     # ---------------------------------------------------------
-    # [오른쪽] 데이터 수정 및 추가 (JSON 에디터)
+    # 데이터 수정 및 추가 (JSON 에디터) — PDF OFF 시 전체 너비 사용
     # ---------------------------------------------------------
     with col_edit:
         st.header("✏️ 데이터 편집")
@@ -1205,13 +1212,13 @@ with main_tab1:
                                         btn_kwargs["type"] = "primary"
                                     if cols[j].button(label, key=f"qbtn_{num}", **btn_kwargs):
                                         st.session_state[value_key] = num
+                                        st.session_state['_from_nav'] = True
 
-                        # 셀렉트박스 값 동기화
-                        if (
-                            select_key not in st.session_state
-                            or st.session_state[select_key] not in existing_nums
-                            or st.session_state[select_key] != st.session_state[value_key]
-                        ):
+                        # 셀렉트박스 동기화: 이전/다음·버튼으로 바꾼 경우에만 value_key → select_key 반영
+                        if st.session_state.get('_from_nav'):
+                            st.session_state[select_key] = st.session_state[value_key]
+                            st.session_state['_from_nav'] = False
+                        elif select_key not in st.session_state or st.session_state.get(select_key) not in existing_nums:
                             st.session_state[select_key] = st.session_state[value_key]
                         
                         # 누락 문항 빠른 확인
@@ -1264,9 +1271,6 @@ with main_tab1:
                         col_select, col_info = st.columns([2, 1])
                         
                         with col_select:
-                            def sync_selected_question():
-                                st.session_state[value_key] = st.session_state[select_key]
-
                             # selectbox에 검토 완료 표시
                             def _fmt_q(x):
                                 _idx = q_options.get(x)
@@ -1279,9 +1283,11 @@ with main_tab1:
                                 options=existing_nums,
                                 format_func=_fmt_q,
                                 key=select_key,
-                                index=existing_nums.index(st.session_state[value_key]),
-                                on_change=sync_selected_question,
                             )
+                            # selectbox에서 사용자가 직접 선택했으면 value_key에 반영
+                            if st.session_state[select_key] != st.session_state[value_key]:
+                                st.session_state[value_key] = st.session_state[select_key]
+                                st.rerun()
                         
                         with col_info:
                             selected_q_num = st.session_state.get(value_key, selected_q_num)
@@ -1306,6 +1312,7 @@ with main_tab1:
                                     disabled=prev_num is None,
                                 ):
                                     st.session_state[value_key] = prev_num
+                                    st.session_state['_from_nav'] = True
                                     st.rerun()
                             with nav_cols[1]:
                                 if st.button(
@@ -1315,6 +1322,7 @@ with main_tab1:
                                     disabled=next_num is None,
                                 ):
                                     st.session_state[value_key] = next_num
+                                    st.session_state['_from_nav'] = True
                                     st.rerun()
                             with nav_cols[2]:
                                 # 미검토 문항으로 바로 이동
@@ -1332,10 +1340,10 @@ with main_tab1:
                                     help="아직 검토하지 않은 다음 문항으로 이동",
                                 ):
                                     if _unreviewed:
-                                        # 현재 문항 이후의 미검토 문항 찾기, 없으면 처음부터
                                         _after = [n for n in _unreviewed if n > selected_q_num]
                                         _target = _after[0] if _after else _unreviewed[0]
                                         st.session_state[value_key] = _target
+                                        st.session_state['_from_nav'] = True
                                         st.rerun()
                         
                         # 선택된 문항 데이터 로드
